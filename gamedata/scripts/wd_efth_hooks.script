@@ -1,0 +1,77 @@
+-- WD integration: leave the original renderer and UI lifecycle installed.
+local installed = false
+local owned = setmetatable({}, { __mode = "k" })
+local medical_pages = { health = "build", main = "build_main" }
+
+function install()
+    if installed then return end
+
+    -- Loading the UI first deliberately permits WD to cache its original builders.
+    -- Hook the public creation method instead of modifying private upvalues.
+    local ui = d_promin_ui
+    local health = d_promin_health_ui
+    local renderer = wd_efth_ui
+    local cls = ui.UIPromin
+    assert(cls and type(cls.ensure_page) == "function", "WD EFTH: unsupported UIPromin.ensure_page")
+    assert(type(ui.get_ui) == "function" and type(ui.get_page) == "function",
+        "WD EFTH: unsupported Promin UI accessors")
+    assert(type(health.build_bio) == "function" and type(health.build_chrome) == "function",
+        "WD EFTH: unsupported medical panel builders")
+
+    local original_ensure = cls.ensure_page
+    local original_get_ui = ui.get_ui
+    local original_chrome = health.build_chrome
+
+    -- The stock navigation builder looks these up at construction time.
+    health.build_bio = renderer.build_bio
+    health.build_chrome = function(cfg)
+        if cfg.bg_tex == "wd_tab_bg_map" then
+            return renderer.build_chrome(cfg)
+        end
+        return original_chrome(cfg)
+    end
+
+    cls.ensure_page = function(self, page_id)
+        local builder = medical_pages[page_id]
+        if not builder and page_id ~= "map_small" then
+            return original_ensure(self, page_id)
+        end
+        local handle = self.pages[page_id]
+        if handle and owned[handle] then return handle end
+        if handle then
+            -- An instance may have been constructed before on_game_start.
+            -- Hide its old widgets before replacing that page once.
+            handle.set_visible(false)
+            self.pages[page_id] = nil
+        end
+        if builder then
+            handle = renderer[builder](self.ctx)
+            self.pages[page_id] = handle
+        else
+            -- Preserve WD's complete navigation implementation and cached builder.
+            handle = original_ensure(self, page_id)
+        end
+        if handle then
+            owned[handle] = true
+            handle.set_visible(page_id == ui.get_page() and self.powered_state ~= false)
+        end
+        return handle
+    end
+
+    ui.get_ui = function(...)
+        local instance = original_get_ui(...)
+        local page_id = ui.get_page()
+        if medical_pages[page_id] or page_id == "map_small" then
+            local handle = instance.pages[page_id]
+            if not handle or not owned[handle] then
+                instance:apply_page()
+            end
+        end
+        return instance
+    end
+    installed = true
+end
+
+function on_game_start()
+    install()
+end

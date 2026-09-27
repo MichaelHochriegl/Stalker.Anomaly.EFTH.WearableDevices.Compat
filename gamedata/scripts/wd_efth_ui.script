@@ -1,0 +1,337 @@
+-- Original compatibility renderer. Uses the installed WD screen/shader/assets
+-- and EFT icon assets; no BHS health tables, damage hooks or save data writes.
+local binder = wd_screen.new_binder(d_promin_config.SCREEN_SHADER)
+local px = {}
+function px.x(n) return 0.001 + n * 0.084 / 1100 end
+function px.y(n) return -0.008 + n * 0.0458 / 600 end
+function px.w(n) return n * 0.084 / 1100 end
+function px.h(n) return n * 0.0458 / 600 end
+function get_px() return px end
+function get_layout() return {} end
+function get_ui_alpha()
+    return wd_screen.get_alpha(d_promin_config.transforms.brightness)
+end
+
+local function color(r, g, b, alpha)
+    return GetARGB(math.floor(alpha or get_ui_alpha()), r, g, b)
+end
+
+local function tint(key)
+    local rgb = d_promin_config.transforms[key] or { 255, 255, 255 }
+    local saturation = math.max(0, math.min(1, (d_promin_config.transforms.saturation or 100) / 100))
+    local high = math.max(rgb[1], rgb[2], rgb[3])
+    return color(
+        math.floor(high + (rgb[1] - high) * saturation),
+        math.floor(high + (rgb[2] - high) * saturation),
+        math.floor(high + (rgb[3] - high) * saturation))
+end
+
+local function health_color(value)
+    -- Red at zero, amber at half, green at full. Geometry also communicates HP.
+    return color(math.floor(255 * math.min(1, 2 * (1 - value))),
+        math.floor(255 * math.min(1, 2 * value)), 70)
+end
+
+local function position(widget, x, y, w, h)
+    widget:SetWndPos(vector2():set(px.x(x), px.y(y)))
+    widget:SetWndSize(vector2():set(px.w(w), px.h(h)))
+end
+
+local function make(owner, texture, x, y, w, h)
+    -- WD's factory attaches each static to its 3D UI root. Reusing a template
+    -- node is supported by the map renderer, and avoids replacing ui_wd.xml.
+    local widget = owner.init("mark")
+    widget:SetStretchTexture(true)
+    position(widget, x, y, w, h)
+    binder.set(widget, texture)
+    widget:Show(false)
+    owner.widgets[#owner.widgets + 1] = widget
+    return widget
+end
+
+local function hide(owner)
+    for _, widget in ipairs(owner.widgets) do widget:Show(false) end
+end
+
+local function show(widget, visible, texture_color)
+    widget:Show(visible)
+    if texture_color then widget:SetTextureColor(texture_color) end
+end
+
+local function digits(owner, x, y, count, width, height)
+    local row = {}
+    for index = 1, count do
+        row[index] = make(owner, "dig2_0", x + (index - 1) * width, y, width, height)
+    end
+    return row
+end
+
+local digit_cache = setmetatable({}, { __mode = "k" })
+
+local function number(row, value, visible, texture_color, pad)
+    local maximum = 10 ^ #row - 1
+    local value_int = math.max(0, math.min(maximum, math.floor(value or 0)))
+    local text = string.format("%0" .. #row .. "d", value_int)
+    local start = pad and 1 or (#row - #tostring(value_int) + 1)
+    for index, widget in ipairs(row) do
+        local shown = visible and index >= start
+        if shown then
+            local texture = "dig2_" .. text:sub(index, index)
+            if digit_cache[widget] ~= texture then
+                binder.set(widget, texture)
+                digit_cache[widget] = texture
+            end
+        end
+        show(widget, shown, texture_color or color(230, 245, 240))
+    end
+end
+
+local function bar(owner, x, y, w, h)
+    return {
+        track = make(owner, "wd_efth_white", x, y, w, h),
+        fill = make(owner, "wd_efth_white", x, y, w, h),
+        x = x, y = y, w = w, h = h,
+    }
+end
+
+local function update_bar(slot, value, visible, texture_color)
+    local amount = math.max(0, math.min(1, value or 0))
+    show(slot.track, visible, color(45, 60, 63))
+    if amount > 0 then
+        position(slot.fill, slot.x, slot.y, slot.w * amount, slot.h)
+    end
+    show(slot.fill, visible and value ~= nil and amount > 0, texture_color)
+end
+
+function build_chrome(cfg)
+    local chrome = { init = cfg.init, widgets = {}, visible = true }
+    local map = cfg.bg_tex == "wd_tab_bg_map"
+    local main = cfg.bg_tex == "wd_tab_bg_main"
+    chrome.bg = make(chrome, map and "wd_efth_bg_map" or main and "wd_efth_bg_main" or "wd_efth_bg_health", 0, 0, 1100, 600)
+    chrome.clock = digits(chrome, 192, 30, 4, 12, 13)
+    position(chrome.clock[3], 223, 30, 10, 13)
+    position(chrome.clock[4], 235, 30, 10, 13)
+    chrome.battery = make(chrome, "wd_tab_bat_full", 137, 29, 32, 17)
+    chrome.helmet = make(chrome, "wd_tab_helmet", 268, 23, 28, 26)
+    chrome.emblem = make(chrome, "wd_emblem_stalker", 74, 16, 40, 42)
+
+    function chrome.update()
+        if not chrome.visible then hide(chrome); return end
+        show(chrome.bg, true, color(255, 255, 255))
+        number(chrome.clock, level.get_time_hours() * 100 + level.get_time_minutes(), true, nil, true)
+        local power = d_promin.get_power_ratio() or 0
+        local suffix = power <= 0.25 and "25" or power <= 0.50 and "50"
+            or power <= 0.75 and "75" or "full"
+        binder.set(chrome.battery, "wd_tab_bat_" .. suffix)
+        show(chrome.battery, power >= 0.05, color(230, 245, 240))
+        show(chrome.helmet, db.actor ~= nil and db.actor:item_in_slot(12) ~= nil, color(230, 245, 240))
+        local faction = d_promin_config.get_emblem_faction()
+        if faction then binder.set(chrome.emblem, "wd_emblem_" .. faction) end
+        show(chrome.emblem, faction ~= nil, tint("faction_color"))
+    end
+    function chrome.set_visible(visible)
+        chrome.visible = visible
+        if visible then chrome.update() else hide(chrome) end
+    end
+    function chrome.repaint() chrome.update() end
+    chrome.update()
+    return chrome
+end
+
+-- Screen-side convention: actor's left limbs and panels appear on the left.
+-- The stomach occupies the space below the shortened original silhouette.
+local BOXES = {
+    head = { 88, 185, 136, 88 }, torso = { 354, 185, 136, 88 },
+    arm_left = { 88, 280, 136, 88 }, arm_right = { 354, 280, 136, 88 },
+    leg_left = { 88, 375, 136, 88 }, leg_right = { 354, 375, 136, 88 },
+    stomach = { 226, 375, 126, 88 },
+}
+
+local function effect_widgets(page)
+    local slots = {}
+    for _, name in ipairs(wd_efth_data.EFFECTS) do
+        slots[name] = {
+            icon = make(page, "ui_efth_hud_effect_" .. name, 0, 0, 16, 15),
+            count = digits(page, 0, 0, 2, 5, 7),
+        }
+    end
+    return slots
+end
+
+local function update_effects(slots, effects, layout)
+    local total = 0
+    for _, name in ipairs(wd_efth_data.EFFECTS) do
+        if effects[name] and effects[name].count > 0 then total = total + 1 end
+    end
+    local index = 0
+    for _, name in ipairs(wd_efth_data.EFFECTS) do
+        local effect, slot = effects[name], slots[name]
+        local active = effect ~= nil and effect.count > 0
+        local alpha = get_ui_alpha()
+        if active then
+            index = index + 1
+            local x, y, w, h, digit_w, digit_h, count_y = layout(index, total)
+            position(slot.icon, x, y, w, h)
+            for n, widget in ipairs(slot.count) do
+                position(widget, x + w - 2 * digit_w + (n - 1) * digit_w,
+                    y + count_y, digit_w, digit_h)
+            end
+            if effect.expiring then
+                alpha = alpha * (0.35 + 0.65 * (math.sin(3 * time_global() / 1000) + 1) / 2)
+            end
+        end
+        show(slot.icon, active, color(255, 255, 255, alpha))
+        number(slot.count, active and effect.count or 0, active and effect.count > 1,
+            color(255, 255, 255, alpha))
+    end
+end
+
+local function limb_effect_layout(box)
+    return function(index, total)
+        local columns = total <= 8 and math.min(4, total) or math.ceil(total / 2)
+        local step = math.min(28, (box[3] - 12) / columns)
+        local width = math.min(24, step - 2)
+        local height = width * 22 / 24
+        local x = box[1] + 6 + (index - 1) % columns * step
+        local y = box[2] + 41 + math.floor((index - 1) / columns) * 24
+        return x, y, width, height, 5, 7, height - 6
+    end
+end
+
+local function global_effect_layout(full)
+    if not full then
+        -- Navigation uses the right half, so systemic effects fit between PSY
+        -- and the limb panel. All 13 categories remain visible without paging.
+        return function(index)
+            return 97 + (index - 1) * 30, 157, 17, 16, 5, 7, 10
+        end
+    end
+    return function(index, total)
+        if total <= 8 then
+            return 599 + (index - 1) % 4 * 112,
+                120 + math.floor((index - 1) / 4) * 140, 40, 37, 9, 12, 47
+        end
+        -- Two icons per original booster rectangle, up to 16 positions.
+        local cell = (index - 1) % 8
+        return 587 + cell % 4 * 112 + math.floor((index - 1) / 8) * 38,
+            122 + math.floor(cell / 4) * 140, 28, 26, 8, 11, 33
+    end
+end
+
+-- EFT overlay XML coordinates, fitted into the existing central panel.
+-- Separate alpha masks allow destroyed regions to disappear completely.
+local MANNEQUIN = {
+    head = { 55, 18, 41, 45 }, torso = { 43, 45, 60, 64 },
+    stomach = { 43, 86, 56, 50 }, arm_left = { 83, 51, 47, 98 },
+    arm_right = { 18, 54, 45, 97 }, leg_left = { 64, 79, 50, 170 },
+    leg_right = { 30, 117, 48, 129 },
+}
+
+-- EFT's artwork faces the viewer. Select the opposite artwork region for
+-- paired limbs so actor-left data colors screen-left without changing anatomy
+-- in the data adapter, health calculations, or effect ownership.
+local MANNEQUIN_REGION = {
+    arm_left = "arm_right", arm_right = "arm_left",
+    leg_left = "leg_right", leg_right = "leg_left",
+}
+
+local function update_mannequin(widget, limb)
+    if limb.hp == 0 then
+        -- EFT CUIBodyOverlay:OnHealthChanged hides destroyed regions.
+        show(widget, false, Colors.TRANSPARENT:GetInt())
+        return
+    end
+    -- Same HSV interpolation and current-maximum denominator as EFT.
+    local c = Colors.LerpHSV(Colors.OVERLAY_RED, Colors.OVERLAY_WHITE, limb.ratio)
+    show(widget, true, GetARGB(math.floor(c.a * get_ui_alpha() / 255), c.r, c.g, c.b))
+end
+
+local function build_content(ctx, full, background)
+    local page = { init = ctx.init, widgets = {}, visible = true, limbs = {}, effects = {} }
+    if full then
+        page.chrome = build_chrome({ init = ctx.init, bg_tex = background })
+    end
+    for _, name in ipairs(wd_efth_data.LIMBS) do
+        local box = BOXES[name]
+        page.limbs[name] = {
+            box = box,
+            bar = bar(page, box[1] + 10, box[2] + 27, box[3] - 20, 8),
+            hp = digits(page, box[1] + 54, box[2] + 8, 3, 7, 10),
+            maximum = digits(page, box[1] + 88, box[2] + 8, 3, 7, 10),
+            effects = effect_widgets(page),
+            effect_layout = limb_effect_layout(box),
+        }
+    end
+    page.mannequin = {}
+    for _, name in ipairs(wd_efth_data.LIMBS) do
+        local region = MANNEQUIN_REGION[name] or name
+        local b = MANNEQUIN[region]
+        page.mannequin[name] = make(page, "ui_efth_overlay_" .. region,
+            235 + (b[1] - 18) * 106 / 112, 191 + (b[2] - 18) * 174 / 231,
+            b[3] * 106 / 112, b[4] * 174 / 231)
+    end
+    page.effects = effect_widgets(page)
+    page.global_layout = global_effect_layout(full)
+    page.systems = {
+        health = bar(page, 144, 94, 337, 12),
+        psy = bar(page, 144, 144, 337, 12),
+        stamina = bar(page, 144, 494, 337, 12),
+        radiation = bar(page, 144, 544, 337, 12),
+    }
+    if full then
+        page.needs = {}
+        for index, name in ipairs({ "energy", "hydration", "sleep" }) do
+            local x = 589 + (index - 1) * 150
+            page.needs[name] = {
+                current = digits(page, x, 523, 3, 13, 16),
+                maximum = digits(page, x + 70, 523, 3, 13, 16),
+            }
+        end
+    end
+
+    function page.update()
+        if page.chrome then page.chrome.update() end
+        if not page.visible then hide(page); return end
+        local state = wd_efth_data.snapshot()
+        if not state then hide(page); return end
+        for _, name in ipairs(wd_efth_data.LIMBS) do
+            local data, ui = state.limbs[name], page.limbs[name]
+            update_mannequin(page.mannequin[name], data)
+            update_bar(ui.bar, data.ratio, true, health_color(data.ratio))
+            number(ui.hp, data.hp, true, health_color(data.ratio))
+            number(ui.maximum, data.maximum, true)
+            update_effects(ui.effects, data.effects, ui.effect_layout)
+        end
+        update_effects(page.effects, state.global_effects, page.global_layout)
+        update_bar(page.systems.health, state.ratio, true, tint("hp_color"))
+        update_bar(page.systems.psy, state.needs.psy, true, tint("psy_color"))
+        update_bar(page.systems.stamina, state.needs.stamina, true, tint("stam_color"))
+        update_bar(page.systems.radiation, state.needs.radiation, true, tint("rad_color"))
+        if full then
+            for name, ui in pairs(page.needs) do
+                local value = state.needs[name]
+                number(ui.current, value and math.floor(value * 100 + 0.5), value ~= nil)
+                number(ui.maximum, 100, value ~= nil)
+            end
+        end
+    end
+    function page.set_visible(visible)
+        page.visible = visible
+        if page.chrome then page.chrome.set_visible(visible) end
+        if visible then page.update() else hide(page) end
+    end
+    function page.repaint() page.update() end
+    return page
+end
+
+function build(ctx)
+    return build_content(ctx, true, "wd_tab_bg_nomap")
+end
+
+function build_main(ctx)
+    return build_content(ctx, true, "wd_tab_bg_main")
+end
+
+function build_bio(ctx)
+    return build_content(ctx, false)
+end

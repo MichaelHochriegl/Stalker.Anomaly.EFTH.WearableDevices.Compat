@@ -1,0 +1,27 @@
+-- Compatibility override: medical information is rendered by Promin.
+-- Deliberately register no overlay callbacks, so inventory/dialog/sleep cannot
+-- recreate the corner HUD. EFT's inventory HUD and health simulation are separate.
+HUD = nil
+
+function HideHUD()
+    if HUD then
+        get_hud():RemoveDialogToRender(HUD)
+        HUD = nil
+    end
+end
+
+function ShowHUD()
+    HideHUD()
+end
+
+function ActorOnFirstUpdate()
+    HideHUD()
+end
+
+function ActorOnNetDestroy()
+    HideHUD()
+end
+
+function on_game_start()
+    -- No corner-overlay instance or persistent MCM setting changes.
+end

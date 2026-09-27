@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<w>
+    <file name="wd_efth\panel">
+        <texture id="wd_efth_bg_health" x="0" y="0" width="1100" height="600" />
+        <texture id="wd_efth_bg_main" x="0" y="600" width="1100" height="600" />
+        <texture id="wd_efth_bg_map" x="0" y="1200" width="1100" height="600" />
+        <texture id="wd_efth_white" x="0" y="1800" width="8" height="8" />
+    </file>
+</w>

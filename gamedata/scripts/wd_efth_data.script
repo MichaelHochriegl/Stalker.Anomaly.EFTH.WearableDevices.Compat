@@ -1,0 +1,82 @@
+-- Read-only adapter for EFT Health System (2026-06-02).
+LIMBS = { "head", "torso", "stomach", "arm_left", "arm_right", "leg_left", "leg_right" }
+EFFECTS = {
+    "painkiller", "thirst", "hunger", "bleed_light", "bleed_heavy",
+    "fresh_wound", "fracture", "pain", "tremor", "buff", "debuff",
+    "concussion", "berserk",
+}
+
+local function ratio(value, maximum)
+    if type(value) ~= "number" or type(maximum) ~= "number" or maximum <= 0 then
+        return 0
+    end
+    return math.max(0, math.min(1, value / maximum))
+end
+
+local function condition(body, name)
+    local source = body.conditions and body.conditions[name]
+    if source and source.Get and source.GetMax then
+        return ratio(source:Get(), source:GetMax())
+    end
+end
+
+function snapshot()
+    local body = rawget(_G, "Body")
+    if not (db and db.actor and db.actor:alive() and body and body.limbs
+        and body.buffs and body.buffs.active and body.buffs.active.queue) then
+        return nil
+    end
+
+    local result = { limbs = {}, effects = {}, global_effects = {}, hp = 0, maximum = 0, needs = {} }
+    for _, name in ipairs(LIMBS) do
+        local limb = body.limbs[name]
+        if not (limb and type(limb.hp) == "number"
+            and type(limb.hp_max_current) == "number" and limb.hp_max_current > 0) then
+            return nil
+        end
+        result.limbs[name] = {
+            hp = math.max(0, limb.hp),
+            maximum = limb.hp_max_current,
+            ratio = ratio(limb.hp, limb.hp_max_current),
+            effects = {},
+        }
+        result.hp = result.hp + math.max(0, limb.hp)
+        result.maximum = result.maximum + limb.hp_max_current
+    end
+    result.ratio = ratio(result.hp, result.maximum)
+
+    local function add_effect(target, buff)
+        local effect = target[buff.ICON]
+        if not effect then
+            effect = { count = 0, expiring = false }
+            target[buff.ICON] = effect
+        end
+        effect.count = effect.count + 1
+        if buff.IS_DURATIONAL and buff.IsExpiring and buff:IsExpiring() then
+            effect.expiring = true
+        end
+    end
+    for _, buff in pairs(body.buffs.active.queue) do
+        if buff.ICON then
+            add_effect(result.effects, buff)
+            -- EFT assigns LIMB when adding the buff. Do not infer a location
+            -- from the icon (e.g. pain can affect more than one body part).
+            local limb = buff.LIMB and result.limbs[buff.LIMB]
+            add_effect(limb and limb.effects or result.global_effects, buff)
+        end
+    end
+    result.needs.energy = condition(body, "energy")
+    result.needs.hydration = condition(body, "hydration")
+    result.needs.stamina = ratio(db.actor.power or 0, 1)
+    result.needs.radiation = ratio(db.actor.radiation or 0, d_promin_config.RAD_FULL)
+    local psy = arszi_psy and arszi_psy.get_psy_health and arszi_psy.get_psy_health()
+    result.needs.psy = ratio(psy or db.actor.psy_health or 0, 1)
+    local sleep = actor_status_sleep
+    if sleep and sleep.get_last_sleep and sleep.get_sleep_blur_4 then
+        local limit = sleep.get_sleep_blur_4()
+        if limit and limit > 0 then
+            result.needs.sleep = ratio(limit - sleep.get_last_sleep(), limit)
+        end
+    end
+    return result
+end
