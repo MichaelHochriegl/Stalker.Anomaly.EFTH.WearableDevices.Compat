@@ -3,6 +3,14 @@
 Compatibility mod that brings the EFT Health System display over to the Promin device.
 It removes the HUD mannequin that EFT Health System normally displays.
 
+## Supported versions and display
+
+- Wearable Devices **0.9.3**.
+- EFT Health System **2026-11-04**.
+- Both WD styles: **Default** and **Default Large**. Change styles through WD's
+  normal customization controls; the medical page follows the selected style.
+- Both Promin tiers use the same integration.
+
 ## Installation
 
 1. Install EFT Health System and its prerequisites using its normal instructions.

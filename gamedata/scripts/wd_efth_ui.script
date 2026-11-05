@@ -1,337 +1,341 @@
--- Original compatibility renderer. Uses the installed WD screen/shader/assets
--- and EFT icon assets; no BHS health tables, damage hooks or save data writes.
-local binder = wd_screen.new_binder(d_promin_config.SCREEN_SHADER)
-local px = {}
-function px.x(n) return 0.001 + n * 0.084 / 1100 end
-function px.y(n) return -0.008 + n * 0.0458 / 600 end
-function px.w(n) return n * 0.084 / 1100 end
-function px.h(n) return n * 0.0458 / 600 end
-function get_px() return px end
-function get_layout() return {} end
-function get_ui_alpha()
-    return wd_screen.get_alpha(d_promin_config.transforms.brightness)
-end
-
-local function color(r, g, b, alpha)
-    return GetARGB(math.floor(alpha or get_ui_alpha()), r, g, b)
-end
-
-local function tint(key)
-    local rgb = d_promin_config.transforms[key] or { 255, 255, 255 }
-    local saturation = math.max(0, math.min(1, (d_promin_config.transforms.saturation or 100) / 100))
-    local high = math.max(rgb[1], rgb[2], rgb[3])
-    return color(
-        math.floor(high + (rgb[1] - high) * saturation),
-        math.floor(high + (rgb[2] - high) * saturation),
-        math.floor(high + (rgb[3] - high) * saturation))
-end
-
-local function health_color(value)
-    -- Red at zero, amber at half, green at full. Geometry also communicates HP.
-    return color(math.floor(255 * math.min(1, 2 * (1 - value))),
-        math.floor(255 * math.min(1, 2 * value)), 70)
-end
-
-local function position(widget, x, y, w, h)
-    widget:SetWndPos(vector2():set(px.x(x), px.y(y)))
-    widget:SetWndSize(vector2():set(px.w(w), px.h(h)))
-end
-
-local function make(owner, texture, x, y, w, h)
-    -- WD's factory attaches each static to its 3D UI root. Reusing a template
-    -- node is supported by the map renderer, and avoids replacing ui_wd.xml.
-    local widget = owner.init("mark")
-    widget:SetStretchTexture(true)
-    position(widget, x, y, w, h)
-    binder.set(widget, texture)
-    widget:Show(false)
-    owner.widgets[#owner.widgets + 1] = widget
-    return widget
-end
-
-local function hide(owner)
-    for _, widget in ipairs(owner.widgets) do widget:Show(false) end
-end
-
-local function show(widget, visible, texture_color)
-    widget:Show(visible)
-    if texture_color then widget:SetTextureColor(texture_color) end
-end
-
-local function digits(owner, x, y, count, width, height)
-    local row = {}
-    for index = 1, count do
-        row[index] = make(owner, "dig2_0", x + (index - 1) * width, y, width, height)
-    end
-    return row
-end
-
-local digit_cache = setmetatable({}, { __mode = "k" })
-
-local function number(row, value, visible, texture_color, pad)
-    local maximum = 10 ^ #row - 1
-    local value_int = math.max(0, math.min(maximum, math.floor(value or 0)))
-    local text = string.format("%0" .. #row .. "d", value_int)
-    local start = pad and 1 or (#row - #tostring(value_int) + 1)
-    for index, widget in ipairs(row) do
-        local shown = visible and index >= start
-        if shown then
-            local texture = "dig2_" .. text:sub(index, index)
-            if digit_cache[widget] ~= texture then
-                binder.set(widget, texture)
-                digit_cache[widget] = texture
-            end
-        end
-        show(widget, shown, texture_color or color(230, 245, 240))
-    end
-end
-
-local function bar(owner, x, y, w, h)
-    return {
-        track = make(owner, "wd_efth_white", x, y, w, h),
-        fill = make(owner, "wd_efth_white", x, y, w, h),
-        x = x, y = y, w = w, h = h,
-    }
-end
-
-local function update_bar(slot, value, visible, texture_color)
-    local amount = math.max(0, math.min(1, value or 0))
-    show(slot.track, visible, color(45, 60, 63))
-    if amount > 0 then
-        position(slot.fill, slot.x, slot.y, slot.w * amount, slot.h)
-    end
-    show(slot.fill, visible and value ~= nil and amount > 0, texture_color)
-end
-
-function build_chrome(cfg)
-    local chrome = { init = cfg.init, widgets = {}, visible = true }
-    local map = cfg.bg_tex == "wd_tab_bg_map"
-    local main = cfg.bg_tex == "wd_tab_bg_main"
-    chrome.bg = make(chrome, map and "wd_efth_bg_map" or main and "wd_efth_bg_main" or "wd_efth_bg_health", 0, 0, 1100, 600)
-    chrome.clock = digits(chrome, 192, 30, 4, 12, 13)
-    position(chrome.clock[3], 223, 30, 10, 13)
-    position(chrome.clock[4], 235, 30, 10, 13)
-    chrome.battery = make(chrome, "wd_tab_bat_full", 137, 29, 32, 17)
-    chrome.helmet = make(chrome, "wd_tab_helmet", 268, 23, 28, 26)
-    chrome.emblem = make(chrome, "wd_emblem_stalker", 74, 16, 40, 42)
-
-    function chrome.update()
-        if not chrome.visible then hide(chrome); return end
-        show(chrome.bg, true, color(255, 255, 255))
-        number(chrome.clock, level.get_time_hours() * 100 + level.get_time_minutes(), true, nil, true)
-        local power = d_promin.get_power_ratio() or 0
-        local suffix = power <= 0.25 and "25" or power <= 0.50 and "50"
-            or power <= 0.75 and "75" or "full"
-        binder.set(chrome.battery, "wd_tab_bat_" .. suffix)
-        show(chrome.battery, power >= 0.05, color(230, 245, 240))
-        show(chrome.helmet, db.actor ~= nil and db.actor:item_in_slot(12) ~= nil, color(230, 245, 240))
-        local faction = d_promin_config.get_emblem_faction()
-        if faction then binder.set(chrome.emblem, "wd_emblem_" .. faction) end
-        show(chrome.emblem, faction ~= nil, tint("faction_color"))
-    end
-    function chrome.set_visible(visible)
-        chrome.visible = visible
-        if visible then chrome.update() else hide(chrome) end
-    end
-    function chrome.repaint() chrome.update() end
-    chrome.update()
-    return chrome
-end
-
--- Screen-side convention: actor's left limbs and panels appear on the left.
--- The stomach occupies the space below the shortened original silhouette.
-local BOXES = {
-    head = { 88, 185, 136, 88 }, torso = { 354, 185, 136, 88 },
-    arm_left = { 88, 280, 136, 88 }, arm_right = { 354, 280, 136, 88 },
-    leg_left = { 88, 375, 136, 88 }, leg_right = { 354, 375, 136, 88 },
-    stomach = { 226, 375, 126, 88 },
+local px = d_promin_config.get_px()
+local health = d_promin_health_ui
+local set_shown = wd_screen.set_shown
+local place = wd_screen.place_widget
+local soft = wd_panel.place_soft_fill
+local LIMBS = {
+    { "head", "HEAD", 425, 80, 410, "head" },
+    { "torso", "TORSO", 425, 158, 202, "torso" },
+    { "stomach", "STOMACH", 633, 158, 202, "pelvis" },
+    { "arm_left", "L ARM", 425, 236, 202, "leftarm" },
+    { "arm_right", "R ARM", 633, 236, 202, "rightarm" },
+    { "leg_left", "L LEG", 425, 314, 202, "leftleg" },
+    { "leg_right", "R LEG", 633, 314, 202, "rightleg" },
 }
+local VITALS = {
+    { "health", "heart" }, { "stamina", "stamina" },
+    { "psy", "psy" }, { "radiation", "rad" },
+}
+local NEEDS = { { "energy", "food" }, { "hydration", "water" }, { "sleep", "sleep" }, { "weight", "weight" } }
 
-local function effect_widgets(page)
-    local slots = {}
-    for _, name in ipairs(wd_efth_data.EFFECTS) do
-        slots[name] = {
-            icon = make(page, "ui_efth_hud_effect_" .. name, 0, 0, 16, 15),
-            count = digits(page, 0, 0, 2, 5, 7),
-        }
-    end
-    return slots
+local function new_text(page, x, y, width, height, chars, align, kit)
+    kit = kit or page.kit
+    local slot = kit.new_text({ chars = chars or 20, width = px.w(width), height = px.h(height), align = align })
+    slot.place(px.x(x), px.y(y))
+    slot.rect = { x, y, width, height }
+    page.cells[#page.cells + 1] = slot
+    return slot
 end
 
-local function update_effects(slots, effects, layout)
-    local total = 0
-    for _, name in ipairs(wd_efth_data.EFFECTS) do
-        if effects[name] and effects[name].count > 0 then total = total + 1 end
+local function show_text(slot, value, role)
+    slot.text = value
+    slot.show(value, role or "text")
+end
+
+local function image(page, texture, x, y, w, h, role)
+    local slot = page.kit.new_image(texture, role or "text")
+    slot.rect = { x, y, w, h }
+    place(slot.widget, px.x(x), px.y(y), px.w(w), px.h(h))
+    page.images[#page.images + 1] = slot
+    return slot
+end
+
+local function new_bar(page, x, y, w, h)
+    local bar = page.kit.new_bar({ level = "text", inset = 0 })
+    bar.place(px.x(x), px.y(y), px.w(w), px.h(h))
+    page.bars[#page.bars + 1] = bar
+    return bar
+end
+
+local function show_bar(page, bar, ratio, role)
+    page.kit.set_role(bar.level, role or "text")
+    bar.set_ratio(ratio)
+    bar.set_visible(ratio > 0)
+end
+
+local function number(page, x, y, width, heights, align, kit)
+    local group = { lines = {}, heights = heights, width = width, kit = kit or page.kit }
+    for _, h in ipairs(heights) do
+        group.lines[#group.lines + 1] = new_text(page, x, y + heights[1] - h, width, h, 20, align, kit)
     end
+    return group
+end
+
+local function show_number(group, value, role, available)
+    local index = #group.lines
+    for i, h in ipairs(group.heights) do
+        if group.kit.measure(value, px.h(h)) <= px.w(available or group.width) then index = i; break end
+    end
+    for i, slot in ipairs(group.lines) do slot.set_visible(i == index) end
+    group.text, group.active = value, group.lines[index]
+    show_text(group.active, value, role)
+    return group.heights[index]
+end
+
+local function limb_role(ratio)
+    if ratio <= 0.25 then return "crit" end
+    if ratio <= 0.5 then return "warn" end
+    return "text"
+end
+
+local function effects(page, x, y, width)
+    local group = { x = x, y = y, width = width, order = {} }
+    for _, name in ipairs(wd_efth_data.EFFECTS) do
+        local slot = {
+            icon = image(page, "ui_efth_hud_effect_" .. name, x, y + 37, 24, 22, "art"),
+            count = new_text(page, x, y, 18, 10, 3),
+            small_count = new_text(page, x, y, 12, 8, 3),
+        }
+        group[name] = slot
+        group.order[#group.order + 1] = name
+    end
+    return group
+end
+
+local function update_effects(page, group, state)
+    local active = 0
+    for _, name in ipairs(group.order) do
+        local value, slot = state[name], group[name]
+        slot.count.set_visible(false); slot.small_count.set_visible(false)
+        set_shown(slot.icon, value ~= nil and value.count > 0)
+        if value and value.count > 0 then active = active + 1 end
+    end
+    local dense = active > math.floor(group.width / 32)
+    local size, step = dense and 16 or (page.large and 24 or 22), dense and 24 or 32
+    local columns = math.floor(group.width / step)
     local index = 0
-    for _, name in ipairs(wd_efth_data.EFFECTS) do
-        local effect, slot = effects[name], slots[name]
-        local active = effect ~= nil and effect.count > 0
-        local alpha = get_ui_alpha()
-        if active then
+    for _, name in ipairs(group.order) do
+        local value, slot = state[name], group[name]
+        if value and value.count > 0 then
+            local x = group.x + index % columns * step
+            local y = group.y + (dense and 31 or 37) + math.floor(index / columns) * 17
+            slot.icon.rect = { x, y, size, size * 22 / 24 }
+            place(slot.icon.widget, px.x(x), px.y(y), px.w(size), px.h(size * 22 / 24))
+            local alpha = 255
+            if value.expiring then alpha = math.floor(255 * (0.35 + 0.65 * (math.sin(3 * time_global() / 1000) + 1) / 2)) end
+            local level = d_promin_config.get_ui_level()
+            slot.icon.widget:SetTextureColor(GetARGB(alpha, level, level, level))
+            if value.count > 1 then
+                local count = dense and slot.small_count or slot.count
+                count.place(px.x(x + (dense and 12 or 17)), px.y(y + (dense and 8 or 13)))
+                show_text(count, "x" .. math.min(value.count, 99))
+            end
             index = index + 1
-            local x, y, w, h, digit_w, digit_h, count_y = layout(index, total)
-            position(slot.icon, x, y, w, h)
-            for n, widget in ipairs(slot.count) do
-                position(widget, x + w - 2 * digit_w + (n - 1) * digit_w,
-                    y + count_y, digit_w, digit_h)
-            end
-            if effect.expiring then
-                alpha = alpha * (0.35 + 0.65 * (math.sin(3 * time_global() / 1000) + 1) / 2)
-            end
-        end
-        show(slot.icon, active, color(255, 255, 255, alpha))
-        number(slot.count, active and effect.count or 0, active and effect.count > 1,
-            color(255, 255, 255, alpha))
-    end
-end
-
-local function limb_effect_layout(box)
-    return function(index, total)
-        local columns = total <= 8 and math.min(4, total) or math.ceil(total / 2)
-        local step = math.min(28, (box[3] - 12) / columns)
-        local width = math.min(24, step - 2)
-        local height = width * 22 / 24
-        local x = box[1] + 6 + (index - 1) % columns * step
-        local y = box[2] + 41 + math.floor((index - 1) / columns) * 24
-        return x, y, width, height, 5, 7, height - 6
-    end
-end
-
-local function global_effect_layout(full)
-    if not full then
-        -- Navigation uses the right half, so systemic effects fit between PSY
-        -- and the limb panel. All 13 categories remain visible without paging.
-        return function(index)
-            return 97 + (index - 1) * 30, 157, 17, 16, 5, 7, 10
         end
     end
-    return function(index, total)
-        if total <= 8 then
-            return 599 + (index - 1) % 4 * 112,
-                120 + math.floor((index - 1) / 4) * 140, 40, 37, 9, 12, 47
-        end
-        -- Two icons per original booster rectangle, up to 16 positions.
-        local cell = (index - 1) % 8
-        return 587 + cell % 4 * 112 + math.floor((index - 1) / 8) * 38,
-            122 + math.floor(cell / 4) * 140, 28, 26, 8, 11, 33
+end
+
+local function hide_content(page)
+    for _, slot in ipairs(page.cells) do slot.set_visible(false) end
+    for _, slot in ipairs(page.images) do set_shown(slot, false) end
+    for _, bar in ipairs(page.bars) do bar.set_visible(false) end
+    for _, box in ipairs(page.boxes) do box.set_visible(false) end
+end
+
+local function build_vitals(page)
+    local h = page.large and 46 or 40
+    for i, spec in ipairs(VITALS) do
+        local key = spec[1]
+        local x, y = 25 + (i - 1) % 2 * 192, 80 + math.floor((i - 1) / 2) * 146
+        local label_h = page.large and 19 or 17
+        local tile = {
+            x = x, y = y,
+            label = image(page, "wd_large_label_" .. key, x + 14, y + 12, 197 / 35 * label_h, label_h, "meta"),
+            icon = image(page, "wd_large_icon_" .. spec[2], x + 134, y + 10, 40, 40),
+            number = number(page, x + 14, y + 98 - h, 160, { h, 30, 20 }, nil, page.digits_kit),
+            unit = new_text(page, x + 14, y + 78, 40, page.large and 18 or 16, 3),
+            bar = new_bar(page, x + 16, y + 113, 156, 12),
+        }
+        page.vitals[key] = tile
+    end
+    local radiation = page.vitals.radiation
+    radiation.notice = {
+        new_text(page, radiation.x + 14, radiation.y + 50, 160, page.large and 24 or 20, 8),
+        new_text(page, radiation.x + 14, radiation.y + 78, 160, page.large and 24 or 20, 8),
+    }
+    local stamina = page.vitals.stamina
+    stamina.cap = page.kit.new_soft_fill("border", wd_panel.SOFT_FILLS.bar)
+    stamina.tick = page.kit.new_soft_fill("text", wd_panel.SOFT_FILLS.line_v)
+    page.images[#page.images + 1] = stamina.cap; page.images[#page.images + 1] = stamina.tick
+    stamina.cap_rect = { x = px.x(stamina.x + 16), w = px.w(156), y = px.y(stamina.y + 113), h = px.h(12),
+        tick_y = px.y(stamina.y + 107), tick_w = px.w(3), tick_h = px.h(24) }
+end
+
+local function show_vital(page, key, ratio, value, unit, role)
+    local tile = page.vitals[key]
+    local unit_h = page.large and 18 or 16
+    local reserve = page.kit.measure(unit, px.h(unit_h)) / px.w(1) + 4
+    local height = show_number(tile.number, value, role, 160 - reserve)
+    local width = page.digits_kit.measure(value, px.h(height))
+    tile.unit.place(px.x(tile.x + 18) + width, px.y(tile.y + 78))
+    show_text(tile.unit, unit, role)
+    show_bar(page, tile.bar, ratio, role)
+    page.kit.set_role(tile.icon, "text"); set_shown(tile.icon, true)
+    page.kit.set_role(tile.label, "meta"); set_shown(tile.label, true)
+end
+
+local function update_vitals(page, state, conditions)
+    for _, key in ipairs({ "health", "stamina", "psy" }) do
+        local value = key == "health" and state.ratio or state.needs[key] or 0
+        show_vital(page, key, value, tostring(health.get_percent(value)), "%", d_promin_config.get_state_role(value))
+    end
+    local msv = wd_vitals.get_radiation_msv()
+    local stamina = page.vitals.stamina
+    local cap = conditions and wd_vitals.get_stamina_cap(conditions, msv) or 1
+    health.place_stamina_cap(stamina, cap, 156)
+    set_shown(stamina.cap, cap < 1); set_shown(stamina.tick, cap < 1)
+    local tile, readable = page.vitals.radiation, wd_geiger.is_dose_readable()
+    for _, line in ipairs(tile.notice) do line.set_visible(false) end
+    if readable then
+        show_vital(page, "radiation", state.needs.radiation or 0, tostring(msv), "mSv",
+            d_promin_config.get_state_role(state.needs.radiation or 0, true))
+    else
+        for _, line in ipairs(tile.number.lines) do line.set_visible(false) end
+        tile.unit.set_visible(false); tile.bar.set_visible(false)
+        page.kit.set_role(tile.icon, "dim"); set_shown(tile.icon, true)
+        page.kit.set_role(tile.label, "dim"); set_shown(tile.label, true)
+        show_text(tile.notice[1], "MODULE", "dim"); show_text(tile.notice[2], "REQUIRED", "dim")
     end
 end
 
--- EFT overlay XML coordinates, fitted into the existing central panel.
--- Separate alpha masks allow destroyed regions to disappear completely.
-local MANNEQUIN = {
-    head = { 55, 18, 41, 45 }, torso = { 43, 45, 60, 64 },
-    stomach = { 43, 86, 56, 50 }, arm_left = { 83, 51, 47, 98 },
-    arm_right = { 18, 54, 45, 97 }, leg_left = { 64, 79, 50, 170 },
-    leg_right = { 30, 117, 48, 129 },
-}
-
--- EFT's artwork faces the viewer. Select the opposite artwork region for
--- paired limbs so actor-left data colors screen-left without changing anatomy
--- in the data adapter, health calculations, or effect ownership.
-local MANNEQUIN_REGION = {
-    arm_left = "arm_right", arm_right = "arm_left",
-    leg_left = "leg_right", leg_right = "leg_left",
-}
-
-local function update_mannequin(widget, limb)
-    if limb.hp == 0 then
-        -- EFT CUIBodyOverlay:OnHealthChanged hides destroyed regions.
-        show(widget, false, Colors.TRANSPARENT:GetInt())
-        return
-    end
-    -- Same HSV interpolation and current-maximum denominator as EFT.
-    local c = Colors.LerpHSV(Colors.OVERLAY_RED, Colors.OVERLAY_WHITE, limb.ratio)
-    show(widget, true, GetARGB(math.floor(c.a * get_ui_alpha() / 255), c.r, c.g, c.b))
-end
-
-local function build_content(ctx, full, background)
-    local page = { init = ctx.init, widgets = {}, visible = true, limbs = {}, effects = {} }
-    if full then
-        page.chrome = build_chrome({ init = ctx.init, bg_tex = background })
-    end
-    for _, name in ipairs(wd_efth_data.LIMBS) do
-        local box = BOXES[name]
-        page.limbs[name] = {
-            box = box,
-            bar = bar(page, box[1] + 10, box[2] + 27, box[3] - 20, 8),
-            hp = digits(page, box[1] + 54, box[2] + 8, 3, 7, 10),
-            maximum = digits(page, box[1] + 88, box[2] + 8, 3, 7, 10),
-            effects = effect_widgets(page),
-            effect_layout = limb_effect_layout(box),
+local function build_needs(page)
+    for i, spec in ipairs(NEEDS) do
+        local x, y = 25 + (i - 1) % 2 * 192, 376 + math.floor((i - 1) / 2) * 90
+        page.needs[spec[1]] = {
+            icon = image(page, "wd_large_icon_" .. spec[2], x + 12, y + 21, 44, 44),
+            value = number(page, x + 68, y + 20, 108, page.large and {42, 30, 20} or {36, 26, 18}),
         }
     end
-    page.mannequin = {}
-    for _, name in ipairs(wd_efth_data.LIMBS) do
-        local region = MANNEQUIN_REGION[name] or name
-        local b = MANNEQUIN[region]
-        page.mannequin[name] = make(page, "ui_efth_overlay_" .. region,
-            235 + (b[1] - 18) * 106 / 112, 191 + (b[2] - 18) * 174 / 231,
-            b[3] * 106 / 112, b[4] * 174 / 231)
-    end
-    page.effects = effect_widgets(page)
-    page.global_layout = global_effect_layout(full)
-    page.systems = {
-        health = bar(page, 144, 94, 337, 12),
-        psy = bar(page, 144, 144, 337, 12),
-        stamina = bar(page, 144, 494, 337, 12),
-        radiation = bar(page, 144, 544, 337, 12),
-    }
-    if full then
-        page.needs = {}
-        for index, name in ipairs({ "energy", "hydration", "sleep" }) do
-            local x = 589 + (index - 1) * 150
-            page.needs[name] = {
-                current = digits(page, x, 523, 3, 13, 16),
-                maximum = digits(page, x + 70, 523, 3, 13, 16),
-            }
-        end
-    end
+end
 
-    function page.update()
-        if page.chrome then page.chrome.update() end
-        if not page.visible then hide(page); return end
-        local state = wd_efth_data.snapshot()
-        if not state then hide(page); return end
-        for _, name in ipairs(wd_efth_data.LIMBS) do
-            local data, ui = state.limbs[name], page.limbs[name]
-            update_mannequin(page.mannequin[name], data)
-            update_bar(ui.bar, data.ratio, true, health_color(data.ratio))
-            number(ui.hp, data.hp, true, health_color(data.ratio))
-            number(ui.maximum, data.maximum, true)
-            update_effects(ui.effects, data.effects, ui.effect_layout)
+local function update_needs(page, state, conditions)
+    for _, spec in ipairs(NEEDS) do
+        local key, text, role = spec[1], "--", "dim"
+        if key == "weight" and conditions then
+            local total, maximum = wd_vitals.get_carry_weight(conditions)
+            text = string.format("%d/%d", math.floor(total + 0.5), math.floor(maximum + 0.5))
+            role = total > maximum and "crit" or "text"
+        elseif key ~= "weight" and state.needs[key] then
+            text = string.format("%d%%", health.get_percent(state.needs[key]))
+            role = d_promin_config.get_state_role(state.needs[key])
         end
-        update_effects(page.effects, state.global_effects, page.global_layout)
-        update_bar(page.systems.health, state.ratio, true, tint("hp_color"))
-        update_bar(page.systems.psy, state.needs.psy, true, tint("psy_color"))
-        update_bar(page.systems.stamina, state.needs.stamina, true, tint("stam_color"))
-        update_bar(page.systems.radiation, state.needs.radiation, true, tint("rad_color"))
-        if full then
-            for name, ui in pairs(page.needs) do
-                local value = state.needs[name]
-                number(ui.current, value and math.floor(value * 100 + 0.5), value ~= nil)
-                number(ui.maximum, 100, value ~= nil)
-            end
-        end
+        local slot = page.needs[key]
+        page.kit.set_role(slot.icon, text == "--" and "dim" or "text"); set_shown(slot.icon, true)
+        show_number(slot.value, text, role)
     end
-    function page.set_visible(visible)
-        page.visible = visible
-        if page.chrome then page.chrome.set_visible(visible) end
-        if visible then page.update() else hide(page) end
+end
+
+local function build_geiger(page)
+    local function row(y, icon)
+        return {
+            icon = image(page, "wd_large_icon_" .. icon, 437, y + 12, 28, 28),
+            label = image(page, "wd_large_label_unavailable", 477, y + 10, 238, 30),
+            unit = image(page, "wd_large_geiger_unit", 677, y + 18, 48, 18, "art"),
+            value = new_text(page, 741, y + 10, 80, page.large and 30 or 26, 11, "right"),
+        }
     end
-    function page.repaint() page.update() end
-    return page
+    page.geiger = { reading = row(400, "rad"), shield = row(500, "prot_rad"),
+        bar = new_bar(page, 439, 462, 382, 10),
+        marker = page.kit.new_soft_fill("text", wd_panel.SOFT_FILLS.line_v) }
+    page.images[#page.images + 1] = page.geiger.marker
+end
+
+local function scale_reading(value)
+    if value <= 10 then return 0 end
+    return clamp(math.log10(value / 10) / 2, 0, 1)
+end
+
+local function update_geiger(page, conditions)
+    local linked = conditions ~= nil and wd_geiger.is_linked()
+    local reading, shield, state = 0, 0, health.GEIGER_OFF
+    if linked then
+        reading, shield = wd_geiger.get_exact_reading(), wd_geiger.get_shield(conditions)
+        state = health.GEIGER_STATES[reading <= 0 and "clear" or (reading > shield and "leaking" or "held")]
+    end
+    for key, value in pairs({reading = reading, shield = shield}) do
+        local row, label = page.geiger[key], state[key]
+        page.kit.set_image(row.label, health.get_label_id(label.text, "wd_large_label_"))
+        page.kit.set_role(row.label, label.role); set_shown(row.label, true)
+        page.kit.set_role(row.icon, label.role); set_shown(row.icon, true)
+        show_text(row.value, linked and string.format("%d", clamp(math.floor(value), -999, 9999)) or label.value, label.role)
+        set_shown(row.unit, linked)
+    end
+    show_bar(page, page.geiger.bar, linked and scale_reading(reading) or 0, state.reading.role)
+    local ratio = scale_reading(shield)
+    soft(page.geiger.marker, px.x(439 + 382 * ratio - 1.5), px.y(456), px.w(3), px.h(22))
+    set_shown(page.geiger.marker, linked)
 end
 
 function build(ctx)
-    return build_content(ctx, true, "wd_tab_bg_nomap")
-end
+    local page = { visible = false, large = ctx.theme == d_promin_config.LARGE_THEME,
+        cells = {}, images = {}, bars = {}, boxes = {}, limbs = {}, mannequin = {}, vitals = {}, needs = {} }
+    page.chrome = d_promin_chrome_ui.build({ init = ctx.init, wnd = ctx.wnd, theme = ctx.theme,
+        bg_tex = page.large and "wd_efth_background_large" or "wd_efth_background", title_tex = health.TITLE_TEXTURE })
+    page.kit = page.chrome.page_kit
+    page.digits_kit = d_promin_chrome_ui.new_kit(ctx.wnd, page.kit and page.kit.style, d_promin_config.DIGITS_FONT)
+    if not page.digits_kit then page.kit = nil end
+    page.allow_geiger = wd_core.throttle(wd_geiger.REFRESH_MS)
+    page.allow_needs = wd_core.throttle(health.SLOW_REFRESH_MS)
+    if page.kit then
+        build_vitals(page); build_needs(page); build_geiger(page)
+        for _, spec in ipairs(LIMBS) do
+            local name, label, x, y, width, part = unpack(spec)
+            local tile = {
+                rect = {x, y, width, 72},
+                label = new_text(page, x + 14, y + 10, 84, page.large and 18 or 16, 7),
+                hp = number(page, x + width - 110, y + 7, 96, page.large and {26, 18} or {22, 16}, "right"),
+                bar = new_bar(page, x + 14, y + 65, width - 28, 4),
+                effects = effects(page, x + 14, y, width - 28),
+                border = page.kit.new_box({ border = "warn" }),
+            }
+            tile.name = label
+            tile.border.place(px.x(x), px.y(y), px.w(width), px.h(72))
+            page.boxes[#page.boxes + 1] = tile.border
+            page.limbs[name] = tile
+            local p = d_promin_bio_large_baked.PARTS[part]
+            page.mannequin[name] = image(page, "wd_large_part_" .. part,
+                964 + (p.x - 964) * 0.86, 168 + (p.y - 95) * 0.86, p.w * 0.86, p.h * 0.86)
+        end
+        page.effect_label = new_text(page, 873, 90, 181, page.large and 18 or 16, 14)
+        page.effects = effects(page, 873, 80, 181)
+    end
 
-function build_main(ctx)
-    return build_content(ctx, true, "wd_tab_bg_main")
-end
-
-function build_bio(ctx)
-    return build_content(ctx, false)
+    function page.update()
+        if not page.visible then return end
+        page.chrome.update()
+        if not page.kit then return end
+        local state = wd_efth_data.snapshot()
+        if not state then hide_content(page); page.has_data = false; return end
+        local conditions = wd_vitals.get_conditions()
+        update_vitals(page, state, conditions)
+        if not page.has_data or page.allow_needs() then update_needs(page, state, conditions) end
+        if not page.has_data or page.allow_geiger() then update_geiger(page, conditions) end
+        page.has_data = true
+        for _, spec in ipairs(LIMBS) do
+            local name, limb = spec[1], state.limbs[spec[1]]
+            local tile, role = page.limbs[name], limb_role(limb.ratio)
+            show_text(tile.label, tile.name, role == "text" and "meta" or role)
+            show_number(tile.hp, string.format("%d/%d", math.floor(limb.hp), math.floor(limb.maximum)), role)
+            show_bar(page, tile.bar, limb.ratio, role)
+            tile.border.set_role(role); tile.border.set_visible(role ~= "text")
+            update_effects(page, tile.effects, limb.effects)
+            page.kit.set_role(page.mannequin[name], role)
+            set_shown(page.mannequin[name], limb.hp > 0)
+        end
+        show_text(page.effect_label, "GLOBAL EFFECTS", "meta")
+        update_effects(page, page.effects, state.global_effects)
+    end
+    function page.set_visible(visible)
+        page.visible = visible
+        page.chrome.set_visible(visible)
+        page.has_data = false
+        if visible then page.update() elseif page.kit then hide_content(page) end
+    end
+    function page.repaint()
+        page.chrome.repaint()
+        if page.digits_kit then page.digits_kit.repaint() end
+        page.update()
+    end
+    page.set_visible(true)
+    return page
 end

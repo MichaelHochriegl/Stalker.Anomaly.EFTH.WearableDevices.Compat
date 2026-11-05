@@ -1,4 +1,3 @@
--- Read-only adapter for EFT Health System (2026-06-02).
 LIMBS = { "head", "torso", "stomach", "arm_left", "arm_right", "leg_left", "leg_right" }
 EFFECTS = {
     "painkiller", "thirst", "hunger", "bleed_light", "bleed_heavy",
@@ -68,15 +67,13 @@ function snapshot()
     result.needs.energy = condition(body, "energy")
     result.needs.hydration = condition(body, "hydration")
     result.needs.stamina = ratio(db.actor.power or 0, 1)
-    result.needs.radiation = ratio(db.actor.radiation or 0, d_promin_config.RAD_FULL)
-    local psy = arszi_psy and arszi_psy.get_psy_health and arszi_psy.get_psy_health()
-    result.needs.psy = ratio(psy or db.actor.psy_health or 0, 1)
-    local sleep = actor_status_sleep
-    if sleep and sleep.get_last_sleep and sleep.get_sleep_blur_4 then
-        local limit = sleep.get_sleep_blur_4()
-        if limit and limit > 0 then
-            result.needs.sleep = ratio(limit - sleep.get_last_sleep(), limit)
-        end
+    result.needs.radiation = ratio(wd_vitals.get_radiation(), 1)
+    result.needs.psy = ratio(wd_vitals.get_psy(), 1)
+    local conditions = wd_vitals.get_conditions()
+    if conditions then
+        -- Keep WD's sleep integrations, food/water above always come from EFT.
+        local _, _, sleep = wd_vitals.get_needs(conditions)
+        result.needs.sleep = sleep
     end
     return result
 end
