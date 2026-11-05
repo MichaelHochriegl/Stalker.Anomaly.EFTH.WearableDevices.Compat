@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<w>
+    <file name="wd_efth\watch_bleeds">
+        <texture id="wd_efth_watch_bleed_head" x="4" y="4" width="60" height="64" />
+        <texture id="wd_efth_watch_bleed_torso" x="68" y="4" width="88" height="92" />
+        <texture id="wd_efth_watch_bleed_leftarm" x="4" y="100" width="68" height="144" />
+        <texture id="wd_efth_watch_bleed_rightarm" x="76" y="100" width="68" height="144" />
+        <texture id="wd_efth_watch_bleed_pelvis" x="160" y="4" width="80" height="72" />
+        <texture id="wd_efth_watch_bleed_leftleg" x="148" y="100" width="72" height="200" />
+        <texture id="wd_efth_watch_bleed_rightleg" x="4" y="304" width="72" height="200" />
+    </file>
+</w>

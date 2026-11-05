@@ -1,0 +1,128 @@
+local OUTLINE_TEXTURE = "wd_efth\\watch_bleeds"
+local REGIONS = {
+    { "head", "head", 1, "head" },
+    { "torso", "torso", 1, "torso" },
+    { "stomach", "torso", 2, "pelvis" },
+    { "arm_left", "leftarm", 1, "leftarm" },
+    { "arm_right", "rightarm", 1, "rightarm" },
+    { "leg_left", "leftleg", 1, "leftleg" },
+    { "leg_right", "rightleg", 1, "rightleg" },
+}
+local PERIODS = { light = 1600, heavy = 600 }
+local screens = setmetatable({}, { __mode = "k" })
+local installed = false
+
+local function attach(screen)
+    local entry = screens[screen]
+    if entry then return entry end
+    entry = { regions = {} }
+    local originals = {}
+    for _, limb in ipairs(screen.limbs) do originals[limb.limb] = limb end
+    local binder = wd_screen.new_binder(screen.ctx.shader)
+    for _, spec in ipairs(REGIONS) do
+        local name, source, index, part = unpack(spec)
+        local limb = { limb = name }
+        -- Keep the original fitted cells and texture rects: the live widgets
+        -- have already been cropped by WD's constructor. Split torso/pelvis so
+        -- EFTH's stomach can have its own HP and bleed state.
+        for _, layer in ipairs(wd_silhouette.LAYERS) do
+            local slot = originals[source][layer].slots[index]
+            local group = wd_screen.new_color_group({ slot.widget })
+            group.slots = { slot }
+            limb[layer] = group
+        end
+        local slot = limb.perm.slots[1]
+        wd_silhouette.measure(limb, slot, wd_face_arcs.SPRITES_TEXTURE)
+        local outline = CUIStatic()
+        outline:SetAutoDelete(true)
+        binder.set(outline, "wd_efth_watch_bleed_" .. part, OUTLINE_TEXTURE)
+        outline:SetStretchTexture(true)
+        outline:Show(false)
+        screen:AttachChild(outline)
+        local cell = slot.cell
+        wd_screen.place_widget(outline, cell.x, cell.y, cell.w, cell.h)
+        limb.outline = { widget = outline, shown = false }
+        entry.regions[name] = limb
+    end
+    screens[screen] = entry
+    return entry
+end
+
+local function severity(effects)
+    if effects.bleed_heavy and effects.bleed_heavy.count > 0 then return "heavy" end
+    if effects.bleed_light and effects.bleed_light.count > 0 then return "light" end
+end
+
+local function animate(screen, entry)
+    local now = time_global()
+    local level = wd_screen.get_brightness_level(screen.ctx.get_brightness())
+    for _, limb in pairs(entry.regions) do
+        local period = PERIODS[limb.bleed]
+        wd_screen.set_shown(limb.outline, period ~= nil)
+        if period then
+            -- Only the edge breathes. HP fill stays steady, and a destroyed
+            -- region can still identify an active bleed. Red at either severity;
+            -- tempo conveys the distinction without new icons.
+            local wave = (1 - math.cos(2 * math.pi * (now % period) / period)) / 2
+            local pulse = math.floor(level * wave + 0.5)
+            wd_screen.set_tint(limb.outline, GetARGB(255, pulse, 0, 0))
+        end
+    end
+end
+
+local function update(screen)
+    local entry = attach(screen)
+    local state = wd_efth_data.snapshot()
+    screen.track_color.set(screen.ctx.get_tint("ok", wd_face_tones.LINE))
+    for name, limb in pairs(entry.regions) do
+        local region = state and state.limbs[name]
+        local ratio = region and region.ratio or 0
+        local tone = wd_face_tones.get_state(ratio)
+        limb.perm.set(screen.ctx.get_body(tone))
+        limb.temp.set(screen.ctx.get_body(tone, true))
+        -- EFTH has no BHS temporary-HP layer. Both ratios are the same, so the
+        -- opaque permanent layer covers the temporary one
+        wd_silhouette.set_limb(limb, ratio, ratio)
+        limb.bleed = region and severity(region.effects) or nil
+    end
+    if db and db.actor and db.actor:alive() then
+        screen:update_helmet()
+        if screen.air then screen.air.track:Show(true); screen.air.fill:Show(true) end
+        screen:update_air()
+        screen.arcs.update()
+    else
+        screen.helmet:Show(false)
+        screen.helmet_shown = false
+        if screen.air then screen.air.track:Show(false); screen.air.fill:Show(false) end
+        for index, window in ipairs(screen.arcs.windows) do
+            window:SetTextureColor(screen.ctx.get_fill(0, "ok"))
+            screen.arcs.icons[index]:SetTextureColor(screen.ctx.get_tint("ok", wd_face_tones.LINE))
+        end
+    end
+    -- Only this face's HP arc uses EFTH. The remaining rings keep WD's own
+    -- stamina/psy/radiation sensor rules, other watch faces are untouched.
+    local ratio = state and state.ratio or 0
+    local tone = wd_face_tones.get_state(ratio)
+    screen.arcs.windows[1]:SetTextureColor(screen.ctx.get_fill(ratio, tone))
+    screen.arcs.icons[1]:SetTextureColor(screen.ctx.get_tint(state and tone or "ok",
+        not state and wd_face_tones.LINE or nil))
+    animate(screen, entry)
+end
+
+function install()
+    if installed then return end
+    local face = face_arcs_mono_limbs
+    local cls = face.UIFaceLimbs
+    assert(cls and type(cls.update_values) == "function", "WD EFTH: unsupported UIFaceLimbs")
+    -- The addon requires EFTH, this face must also be offered without BHS, and
+    -- stay selected while Body is temporarily unavailable during loading.
+    face.FACE.is_available = function() return true end
+    cls.update_values = update
+    local original_update = cls.Update
+    cls.Update = function(self)
+        original_update(self)
+        local entry = screens[self]
+        if entry and self:IsShown() then animate(self, entry) end
+    end
+    installed = true
+end
